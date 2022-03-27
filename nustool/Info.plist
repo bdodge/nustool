@@ -36,6 +36,8 @@
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Requires Bluetooth to discover and operate devices</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

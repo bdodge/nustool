@@ -276,6 +276,8 @@ class ViewController:
             print("Bluetooth status is POWERED OFF")
         case .poweredOn:
             print("Bluetooth status is POWERED ON")
+        @unknown default:
+            print("Bluetooth status is Unknown")
         }
 
         if central.state == .poweredOn {
@@ -296,8 +298,10 @@ class ViewController:
             print("Found \(pername)")
 
             if searchByName {
-                if pername.lowercased().range(of: searchName.lowercased()) == nil {
-                    return
+                if !searchName.isEmpty {
+                    if pername.lowercased().range(of: searchName.lowercased()) == nil {
+                        return
+                    }
                 }
             }
             // add peripheral to array
