@@ -15,6 +15,52 @@ class SocketServer {
     
     var isAccepting: Bool = false
     
+    func fdZero(fdset: inout fd_set) {
+        fdset.fds_bits = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    
+    func fdSet(fd: Int32, fdset: inout fd_set) {
+        let intOffset = Int(fd / 32)
+        let bitOffset = fd % 32
+        let mask = 1 << bitOffset
+        
+        switch intOffset {
+        case 0: fdset.fds_bits.0 = fdset.fds_bits.0 | Int32(mask)
+        case 1: fdset.fds_bits.1 = fdset.fds_bits.1 | Int32(mask)
+        case 2: fdset.fds_bits.2 = fdset.fds_bits.2 | Int32(mask)
+        case 3: fdset.fds_bits.3 = fdset.fds_bits.3 | Int32(mask)
+        case 4: fdset.fds_bits.4 = fdset.fds_bits.4 | Int32(mask)
+        case 5: fdset.fds_bits.5 = fdset.fds_bits.5 | Int32(mask)
+        case 6: fdset.fds_bits.6 = fdset.fds_bits.6 | Int32(mask)
+        case 7: fdset.fds_bits.7 = fdset.fds_bits.7 | Int32(mask)
+        case 8: fdset.fds_bits.8 = fdset.fds_bits.8 | Int32(mask)
+        case 9: fdset.fds_bits.9 = fdset.fds_bits.9 | Int32(mask)
+        case 10: fdset.fds_bits.10 = fdset.fds_bits.10 | Int32(mask)
+        case 11: fdset.fds_bits.11 = fdset.fds_bits.11 | Int32(mask)
+        case 12: fdset.fds_bits.12 = fdset.fds_bits.12 | Int32(mask)
+        case 13: fdset.fds_bits.13 = fdset.fds_bits.13 | Int32(mask)
+        case 14: fdset.fds_bits.14 = fdset.fds_bits.14 | Int32(mask)
+        case 15: fdset.fds_bits.15 = fdset.fds_bits.15 | Int32(mask)
+        case 16: fdset.fds_bits.16 = fdset.fds_bits.16 | Int32(mask)
+        case 17: fdset.fds_bits.17 = fdset.fds_bits.17 | Int32(mask)
+        case 18: fdset.fds_bits.18 = fdset.fds_bits.18 | Int32(mask)
+        case 19: fdset.fds_bits.19 = fdset.fds_bits.19 | Int32(mask)
+        case 20: fdset.fds_bits.20 = fdset.fds_bits.20 | Int32(mask)
+        case 21: fdset.fds_bits.21 = fdset.fds_bits.21 | Int32(mask)
+        case 22: fdset.fds_bits.22 = fdset.fds_bits.22 | Int32(mask)
+        case 23: fdset.fds_bits.23 = fdset.fds_bits.23 | Int32(mask)
+        case 24: fdset.fds_bits.24 = fdset.fds_bits.24 | Int32(mask)
+        case 25: fdset.fds_bits.25 = fdset.fds_bits.25 | Int32(mask)
+        case 26: fdset.fds_bits.26 = fdset.fds_bits.26 | Int32(mask)
+        case 27: fdset.fds_bits.27 = fdset.fds_bits.27 | Int32(mask)
+        case 28: fdset.fds_bits.28 = fdset.fds_bits.28 | Int32(mask)
+        case 29: fdset.fds_bits.29 = fdset.fds_bits.29 | Int32(mask)
+        case 30: fdset.fds_bits.30 = fdset.fds_bits.30 | Int32(mask)
+        case 31: fdset.fds_bits.31 = fdset.fds_bits.31 | Int32(mask)
+        default: break
+        }
+    }
+    
     func Init(port: UInt16) -> Bool {
         
         // make sure no open sockets around
@@ -81,9 +127,10 @@ class SocketServer {
             accept(sock_fd, UnsafeMutableRawPointer($0).assumingMemoryBound(to: sockaddr.self), &client_addr_len)
         }
         
+        isAccepting = false
+
         if client_fd == -1 {
             perror("Failure: accepting connection")
-            isAccepting = false
             return false
         }
         
@@ -91,10 +138,36 @@ class SocketServer {
 
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &sock_opt_on, socklen_t(MemoryLayout.size(ofValue: sock_opt_on)))
 
-        fcntl(client_fd, F_SETFL, O_NONBLOCK);
+        let ret = fcntl(client_fd, F_SETFL, O_NONBLOCK);
+        
+        if ret < 0 {
+            perror("Failure: set non-blocking")
+            close(client_fd)
+            client_fd = -1
+            return false
+        }
 
-        isAccepting = false
-        return true
+         return true
+    }
+    
+    func PollClient(forReading: Bool, timeoutMS: Int) -> Int32 {
+        if client_fd < 0 {
+            return -1;
+        }
+        let numOfFd:Int32 = client_fd + 1
+        let tos : Int32 = Int32(timeoutMS / 1000)
+        let tous : Int32 = Int32((timeoutMS - Int(tos) * 1000) * 1000)
+        var timeout:timeval = timeval(tv_sec: __darwin_time_t(tos), tv_usec: tous)
+        var the_fds:fd_set = fd_set()
+        
+        fdZero(fdset: &the_fds);
+        fdSet(fd: client_fd, fdset: &the_fds)
+        
+        if forReading {
+            return select(numOfFd, &the_fds, nil, nil, &timeout);
+        } else {
+            return select(numOfFd, &the_fds, nil, nil, &timeout);
+        }
     }
     
     func Send(data: String) -> Bool {
@@ -129,12 +202,32 @@ class SocketServer {
         
         var databytes = [UInt8](repeating: 0, count: maxLength)
 
+        let sv = PollClient(forReading: true, timeoutMS: 20)
+        if sv < 0 {
+            perror("Failure: select")
+            close(client_fd)
+            client_fd = -1;
+            return nil
+        }
+        
+        if sv == 0 {
+            return nil
+        }
+        
         let rc = read(client_fd, &databytes, maxLength)
         if rc < 0 {
             if errno == EINTR || errno == EAGAIN {
                 return nil
             }
             perror("Failure: read")
+            close(client_fd)
+            client_fd = -1;
+            return nil
+        }
+        
+        if rc == 0 {
+            // 0 read after successful select means socket closed
+            // on remote side
             close(client_fd)
             client_fd = -1;
             return nil

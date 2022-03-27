@@ -17,9 +17,10 @@ class BLEperipheralViewController:  UIViewController,
     @IBOutlet weak var devName: UILabel!
     @IBOutlet weak var findActivity: UIActivityIndicatorView!
     @IBOutlet weak var disconnectButton: UIButton!
-    @IBOutlet weak var opStatus: UILabel!
     @IBOutlet weak var findStatus: UILabel!
-
+    @IBOutlet weak var bleStatus: UILabel!
+    @IBOutlet weak var tcpStatus: UILabel!
+    
     var parentView : ViewController? = nil
     
     //MARK: Core Bluetooth members
@@ -44,19 +45,61 @@ class BLEperipheralViewController:  UIViewController,
     // MARK: TCP/IP members
     var termPort : UInt16 = 8889
     var terminalServiceStarted = false
+    var terminalServiceAccepting = false
     var terminalServer : SocketServer = SocketServer()
-    
+
+    // MARK: Poll timer
+    // The poll timer is used to poll for TCP input. It could be
+    // done in a work-queue and a select, but we also need a timer
+    // to update the UI and (for some cases) poll the BLE device
+    // on intervals, so we just use the same timer for all
+    // Adjust the period as needed, 10 times a second is plenty fast
+    // without eating battery
+    let pollPeriodMS = 100
+    var pollTimer : Timer = Timer()
+    var tickCount : UInt = 0
+
     //MARK: member vars
     var utils : BLEutils = BLEutils()
     var readValue : String = ""
-    
-    var pollTimer : Timer = Timer()
-    var tickCount : UInt = 0
 
     let statusCharUUID = CBUUID.init(string:String(format:"%04X", LevelHomecharacteristicUUIDs.StatusCharacteristicShortID.rawValue))
     let changeCharUUID = CBUUID.init(string:String(format:"%04X", LevelHomecharacteristicUUIDs.LevelServiceChangedCharacteristicShortID.rawValue))
     let consoleCharUUID = CBUUID.init(string:String(format:"%04X", LevelHomecharacteristicUUIDs.ConsoleCharacteristicShortID.rawValue))
     let commandCharUUID = CBUUID.init(string:String(format:"%04X", LevelHomecharacteristicUUIDs.CommandCharacteristicShortID.rawValue))
+
+    // MARK: operation state
+    enum aOPstate {
+        case osInit
+        case osEnumerating
+        case osFoundNUS
+        case osNoNUS
+        case osAccepting
+        case osConnected
+    }
+    
+    enum aBLEstate {
+        case bleConnected
+        case bleEnumerating
+    }
+    
+    enum aTCPstate {
+        case tcpStarting
+        case tcpAccepting
+        case tcpFailAccept
+        case tcpFailBind
+        case tcpFailSend
+        case tcpFailRecv
+        case tcpConnected
+    }
+
+    var opState : aOPstate = .osInit
+    var bleState : aBLEstate = .bleConnected
+    var tcpState : aTCPstate = .tcpStarting
+    
+    var cachedOPstate : aOPstate = .osConnected
+    var cachedBLEstate : aBLEstate = .bleEnumerating
+    var cachedTCPstate : aTCPstate = .tcpConnected
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -71,19 +114,87 @@ class BLEperipheralViewController:  UIViewController,
         else {
             devName.text = "<No Device Connected>"
         }
+        
+        self.findActivity.hidesWhenStopped = true
+
         // discover services/characteristics for device
         //
         services.removeAll()
-        opStatus.text = "<none>"
-        findStatus.text = "Finding Services"
-        self.findActivity.startAnimating()
+        characters.removeAll()
+        
+        opState = .osEnumerating
+        updateStatus()
+
+        findActivity.startAnimating()
  
         // enumerate services
         thePeripheral?.discoverServices(nil)
         
         // start polling status
         //
-        pollTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(pollStatus), userInfo: nil, repeats: true)
+        pollTimer = Timer.scheduledTimer(timeInterval: Float64(pollPeriodMS) / 1000.0,
+                                         target: self,
+                                         selector: #selector(pollStatus),
+                                         userInfo: nil,
+                                         repeats: true)
+    }
+    
+    func updateStatus() {
+        // operational status
+        if opState != cachedOPstate {
+            cachedOPstate = opState
+            
+            switch (opState) {
+            case .osInit:
+                findStatus.text = "Starting"
+            case .osEnumerating:
+                findStatus.text = "Finding Services"
+            case .osFoundNUS:
+                findStatus.text = "Found NUS Service"
+            case .osNoNUS:
+                findActivity.stopAnimating()
+                findStatus.text = "No NUS Service"
+            case .osAccepting:
+                findActivity.startAnimating()
+                findStatus.text = "Accepting Connections"
+            case .osConnected:
+                findActivity.stopAnimating()
+                findStatus.text = "Connected"
+            }
+        }
+        
+        if bleState != cachedBLEstate {
+            cachedBLEstate = bleState
+            
+            bleStatus.text = "Connected"
+        }
+        
+        if tcpState != cachedTCPstate {
+            cachedTCPstate = tcpState
+            
+            switch (tcpState) {
+            case .tcpStarting:
+                tcpStatus.text = "Starting"
+            case .tcpFailBind:
+                tcpStatus.text = "Failed to bind port"
+            case .tcpFailAccept:
+                findActivity.stopAnimating()
+               tcpStatus.text = "Failed to accept"
+            case .tcpFailSend:
+                findActivity.stopAnimating()
+                tcpStatus.text = "Failed to send data"
+            case .tcpFailRecv:
+                findActivity.stopAnimating()
+                tcpStatus.text = "Failed to read data"
+            case .tcpAccepting:
+                tcpStatus.text = "Accepting"
+            case .tcpConnected:
+                findActivity.stopAnimating()
+                tcpStatus.text = "Connected"
+            }
+        } else if tcpState == .tcpConnected && !terminalServer.IsConnected() {
+            tcpState = .tcpStarting
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -107,23 +218,26 @@ class BLEperipheralViewController:  UIViewController,
         tickCount += 1
         
         if (tickCount % 20) == 0 {
+            // every 2 seconds
             if !terminalServiceStarted {
                startTerminalServer()
             }
-            readLockStatus()
+            readDeviceStatus()
+            updateStatus()
         }
     }
     
     func startTerminalServer() {
         // if found NUS services, open port
         if nrxCharServiceIndex < 0 || ntxCharServiceIndex < 0 {
-            findStatus.text = "No NUS Service Available"
             return
         }
-        findStatus.text = "found NUS Service"
+        
+        opState = .osFoundNUS
+        bleState = .bleConnected
         
         if !terminalServer.Init(port: termPort) {
-            findStatus.text = "Failed: terminal (init)"
+            tcpState = .tcpFailBind
             return
         }
         
@@ -141,10 +255,23 @@ class BLEperipheralViewController:  UIViewController,
         }
         
         if !terminalServer.IsConnected() {
-            if !terminalServer.IsAccepting() {
-                // defer accepting to work queue
-                if !terminalServer.Accept() {
-                    findStatus.text = "Failed: terminal (accept)"
+            if !terminalServer.IsAccepting() && !terminalServiceAccepting {
+                // use member var here to protect against race condition of
+                // terminalServer setting its flags asycnchronously
+                terminalServiceAccepting = true
+                
+                // Defer blocking accept call to dispatch queue to avoid
+                // non-blocking / select in the timer loop
+                DispatchQueue.global().async {
+                    self.tcpState = .tcpAccepting
+
+                     if !self.terminalServer.Accept() {
+                        self.tcpState = .tcpFailAccept
+                    }
+                    else {
+                        self.tcpState = .tcpConnected
+                    }
+                    self.terminalServiceAccepting = false
                 }
             }
         } else {
@@ -161,12 +288,12 @@ class BLEperipheralViewController:  UIViewController,
     func onTerminalData(_ data: String) {
         if terminalServiceStarted && terminalServer.IsConnected() {
             if !terminalServer.Send(data: data) {
-                findStatus.text = "Failed: terminal (send)"
+                tcpState = .tcpFailSend
             }
         }
     }
     
-    func readLockStatus() {
+    func readDeviceStatus() {
         if true {
             //let shortid = LevelHomecharacteristicUUIDs.StatusCharacteristicShortID.rawValue
             
@@ -190,8 +317,8 @@ class BLEperipheralViewController:  UIViewController,
             print("  Discoserv \(utils.nameForService(uuid: service.uuid))")
             services += [service]
             DispatchQueue.main.async { () -> Void in
-                self.findActivity.startAnimating()
-                self.findStatus.text = "Finding Characteristics for\(self.utils.nameForService(uuid: service.uuid))"
+                 self.bleState = .bleEnumerating
+                 //self.findStatus.text = "Finding Characteristics for\(self.utils.nameForService(uuid: service.uuid))"
             }
             // enumerate chars
             characters += [[CBCharacteristic]()]
@@ -199,9 +326,8 @@ class BLEperipheralViewController:  UIViewController,
         }
         DispatchQueue.main.async { () -> Void in
 
-            self.findStatus.text = "Press Disconnect to disconnect"
-            self.opStatus.text = ""
-            self.findActivity.stopAnimating()
+            self.bleState = .bleConnected
+            self.updateStatus()
         }
     }
 

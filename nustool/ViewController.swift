@@ -79,6 +79,7 @@ class ViewController:
         connmodeList = ["Operation", "Debug"]
         connectionMode = .forOperation
 
+        searchActivity.hidesWhenStopped = true
         searchByButton.selectedSegmentIndex = 0
 
         // setup delegate and datasource for table
